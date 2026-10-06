@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Light Show</title>
+<style>
+  :root { --bg:#0b0b12; --fg:#fff; --accent:#ff4fa3; }
+  * { box-sizing: border-box; }
+  html, body { height:100%; margin:0; background:var(--bg); color:var(--fg);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  #intro { min-height:100%; display:flex; flex-direction:column; align-items:center;
+    justify-content:center; gap:18px; padding:28px; text-align:center; }
+  h1 { margin:0; font-size:2rem; }
+  p { margin:0; max-width:34ch; line-height:1.45; opacity:.85; }
+  .warn { font-size:.85rem; border:1px solid #ffffff44; border-radius:10px; padding:10px 14px; }
+  button { font-size:1.25rem; font-weight:700; padding:16px 36px; border:0; border-radius:999px;
+    background:var(--accent); color:#000; }
+  #stage { display:none; position:fixed; inset:0; background:#000; }
+  #stop { position:absolute; bottom:calc(20px + env(safe-area-inset-bottom,0px)); left:50%;
+    transform:translateX(-50%); font-size:1rem; padding:10px 24px; background:#ffffff22;
+    color:#fff; backdrop-filter: blur(6px); }
+  #status { position:absolute; top:calc(14px + env(safe-area-inset-top,0px)); width:100%;
+    text-align:center; font-size:.8rem; opacity:.5; mix-blend-mode:difference; color:#fff; }
+</style>
+</head>
+<body>
+
+<div id="intro">
+  <h1>💡 Join the Light Show!</h1>
+  <p>Tap start, hold your phone up, and flash along with everyone around you.</p>
+  <p class="warn">⚠️ Contains flashing lights. Don't use if you have photosensitive epilepsy or are sensitive to flashing light.</p>
+  <button id="start">Start</button>
+  <p id="support" style="font-size:.8rem"></p>
+</div>
+
+<div id="stage">
+  <div id="status"></div>
+  <button id="stop">Stop</button>
+</div>
+
+<script>
+/* ---------- CONFIG (override with URL params) ----------
+   ?show=pulse|chase|sparkle|heartbeat|glow
+   ?bpm=100                     (tempo)
+   Colors are fixed: pink and white (screen mode only; flashlight is always white)
+   Example: lightshow.html?show=chase&bpm=110
+---------------------------------------------------------- */
+const params = new URLSearchParams(location.search);
+const SHOW   = params.get("show") || "pulse";
+const BPM    = Math.min(Math.max(parseFloat(params.get("bpm")) || 100, 40), 150);
+const COLORS = ["#ff4fa3", "#ffffff"];  // pink, white
+
+// Safety: keep a full on/off flash cycle at or under ~3 flashes per second.
+const STEP_MS = Math.max(60000 / BPM / 2, 170);
+
+// Each phone gets a random group (0-3) and id so crowds look like waves/sparkles.
+const GROUP = Math.floor(Math.random() * 4);
+const PHONE = Math.random();
+
+function hash(n) { const x = Math.sin(n * 127.1 + PHONE * 311.7) * 43758.5453; return x - Math.floor(x); }
+
+const SHOWS = {
+  pulse:     (s) => s % 2 === 0,
+  heartbeat: (s) => [1,0,1,0,0,0,0,0][s % 8] === 1,
+  chase:     (s) => (s + GROUP) % 4 === 0,
+  sparkle:   (s) => hash(s) > 0.65,
+  glow:      ()  => true
+};
+
+/* ---------- Flashlight / screen output ---------- */
+let track = null, stream = null, torchOK = false, running = false, wakeLock = null;
+let lastOn = null, lastColor = null;
+
+const stage = document.getElementById("stage");
+const status = document.getElementById("status");
+
+async function initTorch() {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" } }, audio: false });
+    track = stream.getVideoTracks()[0];
+    const caps = track.getCapabilities ? track.getCapabilities() : {};
+    torchOK = !!caps.torch;
+    if (!torchOK) { stopStream(); }
+  } catch (e) { torchOK = false; }
+}
+
+function stopStream() {
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  stream = null; track = null;
+}
+
+async function setTorch(on) {
+  try { await track.applyConstraints({ advanced: [{ torch: on }] }); } catch (e) {}
+}
+
+function frame() {
+  if (!running) return;
+  const step = Math.floor(Date.now() / STEP_MS);   // shared clock => synced phones
+  const on = (SHOWS[SHOW] || SHOWS.pulse)(step);
+  const color = COLORS[Math.floor(step / 2) % COLORS.length];
+
+  if (on !== lastOn) {
+    lastOn = on;
+    if (torchOK) setTorch(on);
+  }
+  // Screen always mirrors the show (dim backup on Android, main effect on iPhone)
+  const c = on ? color : "#000";
+  if (c !== lastColor) { stage.style.background = c; lastColor = c; }
+  requestAnimationFrame(frame);
+}
+
+async function start() {
+  document.getElementById("intro").style.display = "none";
+  stage.style.display = "block";
+  status.textContent = "Starting…";
+  await initTorch();
+  status.textContent = torchOK ? "Flashlight mode" : "Screen mode";
+  try { if ("wakeLock" in navigator) wakeLock = await navigator.wakeLock.request("screen"); } catch (e) {}
+  running = true; lastOn = null; lastColor = null;
+  requestAnimationFrame(frame);
+  setTimeout(() => status.style.display = "none", 3000);
+}
+
+async function stop() {
+  running = false;
+  if (torchOK && track) await setTorch(false);
+  stopStream();
+  try { if (wakeLock) await wakeLock.release(); } catch (e) {}
+  stage.style.display = "none";
+  stage.style.background = "#000";
+  document.getElementById("intro").style.display = "flex";
+}
+
+document.getElementById("start").addEventListener("click", start);
+document.getElementById("stop").addEventListener("click", stop);
+document.addEventListener("visibilitychange", () => { if (document.hidden && running) stop(); });
+
+document.getElementById("support").textContent =
+  /iPhone|iPad|iPod/.test(navigator.userAgent)
+    ? "On iPhone the show plays on your screen (Apple doesn't let websites use the flashlight)."
+    : "On most Android phones this will use your real flashlight.";
+</script>
+</body>
+</html>
